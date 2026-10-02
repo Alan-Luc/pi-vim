@@ -508,6 +508,13 @@ export class ModalEditor extends CustomEditor {
 
   private setMode(mode: Mode = "insert"): void {
     const prev = this.mode;
+    if (
+      prev !== "insert" &&
+      mode === "insert" &&
+      this.isShowingAutocomplete()
+    ) {
+      super.handleInput("\x1b");
+    }
     this.mode = mode;
     // Leaving insert ends any host-tainted session, so the next implicit
     // insert (post-submit or a re-entry) records normally again.
@@ -746,11 +753,10 @@ export class ModalEditor extends CustomEditor {
   }
 
   private shouldCancelInsertRepeatInput(key: string): boolean {
-    // A submit must cancel the recording, not be captured into it. A bare `\r`
-    // check missed the Kitty CSI-u Enter (`\x1b[13u`), letting it be recorded
-    // and then re-submitted on replay.
-    if (this.isSubmitEnterInput(key)) return true;
-    return key === "\t" && this.isShowingAutocomplete();
+    return (
+      this.isShowingAutocomplete() &&
+      (key === "\t" || this.isSubmitEnterInput(key))
+    );
   }
 
   /**
@@ -770,15 +776,10 @@ export class ModalEditor extends CustomEditor {
     if (this.mode === "insert") {
       if (this.shouldCancelInsertRepeatInput(key)) {
         this.clearRepeatState();
-        // A submit clears the host undo stack and an autocomplete accept injects
-        // host text; either way `floor` no longer indexes a valid snapshot, so
-        // discard the window. There is no cross-submit undo.
+        // Autocomplete acceptance injects host text, so no open window or
+        // continued typing in this session may resurrect the recording.
         this.discardUndoWindow();
-        // Enter submits and opens a fresh prompt, so the next implicit insert
-        // is repeatable again. Tab-completion is a host edit inside the
-        // current session, so it taints the rest of that session — continued
-        // typing must not resurrect a recording.
-        this.implicitInsertSuppressed = !this.isSubmitEnterInput(key);
+        this.implicitInsertSuppressed = true;
         return;
       }
       // Implicit insert (startup / post-submit): the editor is already in
@@ -786,9 +787,9 @@ export class ModalEditor extends CustomEditor {
       // ran to seed one. Synthesize an `i` entry on the first real keystroke
       // so the typed run becomes dot-repeatable, exactly as if the user had
       // pressed `i` in normal mode. Escape finalizes it as the last change;
-      // Enter and Tab-completion stay excluded via the cancel check above, so
-      // a later replay can never submit. A session tainted by a mid-insert
-      // host edit stays suppressed until Escape leaves insert mode.
+      // accepted completions stay excluded via the cancel check above, while
+      // Enter without a completion is recorded as typed newline. A session
+      // tainted by a mid-insert host edit stays suppressed until Escape.
       if (
         !this.repeatRecording &&
         !this.implicitInsertSuppressed &&
@@ -1362,6 +1363,10 @@ export class ModalEditor extends CustomEditor {
           this.openLineAbove();
           return;
         }
+        if (this.isSubmitEnterInput(data)) {
+          super.handleInput(this.isShowingAutocomplete() ? data : NEWLINE);
+          return;
+        }
         super.handleInput(data);
         return;
       }
@@ -1484,6 +1489,7 @@ export class ModalEditor extends CustomEditor {
       return;
     }
     if ("insert" === this.mode) {
+      if (this.isShowingAutocomplete()) super.handleInput("\x1b");
       this.clearUnderlyingPasteStateIfActive();
       this.setMode("normal");
       if (this.getCursor().col > 0) this.moveCursorBy(-1);
@@ -2622,6 +2628,13 @@ export class ModalEditor extends CustomEditor {
     }
 
     if (isPrintableChunk(data)) return;
+    if (
+      this.mode === "normal" &&
+      this.isSubmitEnterInput(data) &&
+      this.isShowingAutocomplete()
+    ) {
+      super.handleInput("\x1b");
+    }
     super.handleInput(data);
   }
 

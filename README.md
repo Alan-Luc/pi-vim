@@ -1,5 +1,7 @@
 # pi-vim
 
+> **Maintained fork:** Based on [lajarre/pi-vim](https://github.com/lajarre/pi-vim) 0.14.2; changes only Enter/autocomplete behavior, stale-completion cleanup, and their regression coverage.
+
 Vim in Pi's prompt. Draft in INSERT, edit in NORMAL, select in VISUAL — and run `:!git status` from the middle of a prompt without losing a word of your draft.
 
 ```bash

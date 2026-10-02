@@ -106,47 +106,37 @@ function setRawEditorText(editor: ModalEditor, text: string): void {
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("dot repeat review regressions", () => {
-  it("repeats post-submit implicit insert without re-submitting", () => {
+  it("repeats post-newline implicit insert without submitting", () => {
     const { editor, submits } = makeSubmitEditor();
 
     editor.handleInput(ESC);
     sendKeys(editor, ["i", "h", "i", "\r"]);
-    assert.deepEqual(submits, ["hi"]);
-    assert.equal(editor.getText(), "");
+    assert.deepEqual(submits, []);
+    assert.equal(editor.getText(), "hi\n");
     assert.equal(editor.getMode(), "insert");
 
-    // Post-submit typing runs in an implicit insert session, so it is now
-    // dot-repeatable. The submit itself stays excluded, so replaying the
-    // recorded insert re-types the text without ever submitting again.
     sendKeys(editor, ["o", "k", ESC, "0", "."]);
 
-    assert.deepEqual(submits, ["hi"]); // no second submit
-    assert.equal(editor.getText(), "okok"); // `.` re-inserted "ok"
+    assert.deepEqual(submits, []);
+    assert.equal(editor.getText(), "hi\nhi\nokok");
     assert.equal(editor.getMode(), "normal");
   });
 
-  it("does not re-submit when a Kitty-Enter ends an implicit insert", () => {
-    // Pi maps the Kitty keyboard protocol's \x1b[13u to Enter/submit, exactly
-    // like a legacy \r. If the implicit-insert recorder only excludes \r, the
-    // Kitty-Enter gets captured and re-submits on replay: "a", Kitty-Enter,
-    // "b", Esc, "." would submit twice.
+  it("keeps Kitty-Enter as a newline in implicit insert", () => {
     const KITTY_ENTER = "\x1b[13u";
-    assert.ok(matchesKey(KITTY_ENTER, "enter")); // host treats it as submit
+    assert.ok(matchesKey(KITTY_ENTER, "enter"));
     const { editor, submits } = makeSubmitEditor((data) =>
       matchesKey(data, "enter"),
     );
 
-    // A fresh editor opens in the startup implicit insert (no vim `i`).
     sendKeys(editor, ["a", KITTY_ENTER, "b", ESC]);
-    assert.deepEqual(submits, ["a"]); // the Kitty-Enter submitted "a"
-    assert.equal(editor.getText(), "b");
+    assert.deepEqual(submits, []);
+    assert.equal(editor.getText(), "a\nb");
     assert.equal(editor.getMode(), "normal");
 
-    // `.` repeats only the post-submit implicit insert ("b"); it must not
-    // resurrect the captured Kitty-Enter and submit a second time.
     sendKeys(editor, ["0", "."]);
-    assert.deepEqual(submits, ["a"]); // still exactly one submit
-    assert.equal(editor.getText(), "bb");
+    assert.deepEqual(submits, []);
+    assert.equal(editor.getText(), "a\na\nbb");
   });
 
   it("keeps failed char-motion replay atomic and does not leak Escape", () => {
