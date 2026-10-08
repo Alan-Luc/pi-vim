@@ -2,12 +2,7 @@ import {
   CustomEditor,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import {
-  Key,
-  matchesKey,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import {
   ClipboardMirror,
   type ClipboardReadFn,
@@ -258,6 +253,7 @@ type ModalEditorOptions = {
   // Reverse-video transform applied to the label. When the label defers to the
   // host color it is wrapped with this so it keeps its block styling.
   labelTransform?: ((s: string) => string) | null;
+  onModeLabel?: (label: string | undefined) => void;
 };
 
 export class ModalEditor extends CustomEditor {
@@ -312,7 +308,7 @@ export class ModalEditor extends CustomEditor {
   private labelTransform: ((s: string) => string) | null = null;
   private readonly cursorShapeRuntime: CursorShapeRuntime | null;
   private lastCursorShapeSequence: CursorShapeSequence | null = null;
-  private lastLineCache = { l: "", w: 0, label: "", result: "" };
+  private readonly onModeLabel: ((label: string | undefined) => void) | null;
 
   private unnamedRegister: string = "";
   private preferRegisterForPut = false;
@@ -359,6 +355,7 @@ export class ModalEditor extends CustomEditor {
     this.borderSync = opts?.borderSync ?? null;
     this.labelSync = opts?.labelSync ?? null;
     this.labelTransform = opts?.labelTransform ?? null;
+    this.onModeLabel = opts?.onModeLabel ?? null;
     this.installModeBorderColorizer();
   }
 
@@ -4111,26 +4108,15 @@ export class ModalEditor extends CustomEditor {
   render(width: number): string[] {
     const lines = super.render(width);
     this.syncCursorShapeForRender(lines);
-    if (lines.length === 0) return lines;
+    if (lines.length === 0) {
+      this.onModeLabel?.(undefined);
+      return lines;
+    }
 
     const rawLabel = fitModeLabel(this.getModeLabel(), width);
     const colorize = this.getModeLabelColorizer();
     const label = colorize ? colorize(rawLabel) : rawLabel;
-    const last = lines.length - 1;
-    const lastLine = lines[last];
-    if (lastLine && visibleWidth(lastLine) >= visibleWidth(rawLabel)) {
-      const contentWidth = width - visibleWidth(rawLabel);
-      const c = this.lastLineCache;
-      if (lastLine !== c.l || contentWidth !== c.w || label !== c.label) {
-        c.l = lastLine;
-        c.w = contentWidth;
-        c.label = label;
-        c.result = truncateToWidth(lastLine, contentWidth, "") + label;
-      }
-      lines[last] = c.result;
-    } else {
-      lines[last] = label;
-    }
+    this.onModeLabel?.(label);
     return lines;
   }
 
@@ -4177,10 +4163,14 @@ export class ModalEditor extends CustomEditor {
   }
 }
 
+const MODE_STATUS_KEY = "pi-vim-mode";
+
 export default function (pi: ExtensionAPI) {
   let cursorShapeCleanup: CursorShapeCleanup | null = null;
+  let lastPublishedModeLabel: string | undefined;
 
   pi.on("session_start", (_event, ctx) => {
+    lastPublishedModeLabel = undefined;
     const piVimSettings = readPiVimSettings(ctx.cwd);
     const clipboardMirrorPolicy = resolveClipboardMirrorPolicy(
       piVimSettings.clipboardMirror,
@@ -4214,6 +4204,11 @@ export default function (pi: ExtensionAPI) {
       piVimSettings.modeChange,
       (event) => pi.events.emit("pi-vim:mode-change", event),
     );
+    const publishModeLabel = (label: string | undefined): void => {
+      if (label === lastPublishedModeLabel) return;
+      lastPublishedModeLabel = label;
+      ctx.ui.setStatus(MODE_STATUS_KEY, label);
+    };
     ctx.ui.setEditorComponent((tui, theme, kb) => {
       cursorShapeCleanup = enableCursorShapeSupport(tui);
       const editor = new ModalEditor(tui, theme, kb, {
@@ -4223,6 +4218,7 @@ export default function (pi: ExtensionAPI) {
         labelSync,
         offBorderColor,
         labelTransform: reverseVideo,
+        onModeLabel: publishModeLabel,
       });
       editor.setClipboardMirrorPolicy(clipboardMirrorPolicy.policy);
       editor.setQuitFn(() => ctx.shutdown());
@@ -4242,12 +4238,17 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on("session_shutdown", (event) => {
+  pi.on("session_shutdown", (event, ctx) => {
     try {
       cursorShapeCleanup?.(event);
     } finally {
-      cancelModeChangeCommands();
-      cursorShapeCleanup = null;
+      try {
+        ctx.ui.setStatus(MODE_STATUS_KEY, undefined);
+      } finally {
+        lastPublishedModeLabel = undefined;
+        cancelModeChangeCommands();
+        cursorShapeCleanup = null;
+      }
     }
   });
 }

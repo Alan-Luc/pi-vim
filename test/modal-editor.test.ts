@@ -93,6 +93,7 @@ type EditorFactory = (
 type Theme = ConstructorParameters<typeof ModalEditor>[1];
 
 type NotificationCall = { message: string; type: string };
+type ModeStatusUpdate = { key: string; text: string | undefined };
 type ThemeFgCall = { token: string; text: string };
 
 function getRawEditor(editor: ModalEditor): ModalEditorTestInternals {
@@ -244,6 +245,7 @@ type InstalledExtension = {
   eventBusEmissions(): Array<{ event: string; data: unknown }>;
   readonly notificationCalls: number;
   readonly notifications: NotificationCall[];
+  readonly modeStatusUpdates: ModeStatusUpdate[];
   readonly shutdownCalls: number;
   emitShutdown(event?: { type?: string; reason?: string }): Promise<void>;
   readonly sessionShutdownHandlerCount: number;
@@ -281,6 +283,7 @@ async function installExtensionWithEditorFactory(
   let editorFactory: EditorFactory | null = null;
   let notificationCalls = 0;
   const notifications: NotificationCall[] = [];
+  const modeStatusUpdates: ModeStatusUpdate[] = [];
   let shutdownCalls = 0;
   const ctx = {
     cwd: process.cwd(),
@@ -293,6 +296,9 @@ async function installExtensionWithEditorFactory(
       notify(message: string, type: string): void {
         notificationCalls++;
         notifications.push({ message, type });
+      },
+      setStatus(key: string, text: string | undefined): void {
+        modeStatusUpdates.push({ key, text });
       },
     },
     shutdown(): void {
@@ -317,6 +323,7 @@ async function installExtensionWithEditorFactory(
     get notifications() {
       return notifications;
     },
+    modeStatusUpdates,
     get shutdownCalls() {
       return shutdownCalls;
     },
@@ -349,11 +356,15 @@ const allSurfaces = (value: SurfaceSync): SurfaceSyncMap => ({
 async function createBorderEditor(
   theme: ReturnType<typeof createRecordingTheme>,
   settings: PiVimSettings,
-): Promise<{ editor: ModalEditor; restore: () => void }> {
+): Promise<{
+  editor: ModalEditor;
+  restore: () => void;
+  extension: InstalledExtension;
+}> {
   const restore = setPiVimSettingsReaderForTests(() => settings);
   const extension = await installExtensionWithEditorFactory(theme);
   const editor = extension.editorFactory(stubTui, stubTheme, stubKeybindings);
-  return { editor, restore };
+  return { editor, restore, extension };
 }
 
 function createSpawnErrno(message: string): Error {
@@ -1163,13 +1174,90 @@ describe("mode change extension hook", () => {
   });
 });
 
+describe("mode status extension hook", () => {
+  it("publishes initial, mode, EX, and visual labels without border text", async () => {
+    const extension = await installExtensionWithEditorFactory();
+    const editor = extension.editorFactory(
+      stubTui,
+      stubTheme,
+      stubKeybindings,
+    );
+
+    sendKeys(editor, ["\x1b"]);
+    const initialLines = editor.render(80);
+    assert.deepEqual(extension.modeStatusUpdates, [
+      { key: "pi-vim-mode", text: "\x1b[7m NORMAL \x1b[27m" },
+    ]);
+    assert.equal(initialLines.at(-1)?.includes(" NORMAL "), false);
+
+    editor.render(80);
+    assert.equal(extension.modeStatusUpdates.length, 1);
+
+    sendKeys(editor, [":"]);
+    const exLines = editor.render(80);
+    assert.deepEqual(extension.modeStatusUpdates.at(-1), {
+      key: "pi-vim-mode",
+      text: "\x1b[7m EX :_ \x1b[27m",
+    });
+    assert.equal(exLines.at(-1)?.includes(" EX "), false);
+
+    sendKeys(editor, ["\x1b", "v"]);
+    const visualLines = editor.render(80);
+    assert.deepEqual(extension.modeStatusUpdates.at(-1), {
+      key: "pi-vim-mode",
+      text: "\x1b[7m VISUAL \x1b[27m",
+    });
+    assert.equal(visualLines.at(-1)?.includes(" VISUAL "), false);
+
+    await extension.emitShutdown();
+    assert.deepEqual(extension.modeStatusUpdates.at(-1), {
+      key: "pi-vim-mode",
+      text: undefined,
+    });
+  });
+
+  it("publishes a fitted colorized label unchanged", async () => {
+    const theme = {
+      borderColor: (s: string) => s,
+      fg: (_token: string, text: string) => `\x1b[36m${text}\x1b[39m`,
+      bold: (s: string) => s,
+    } as Theme;
+    const restore = setPiVimSettingsReaderForTests(() => ({
+      modeColors: { ex: "warning" },
+    }));
+
+    try {
+      const extension = await installExtensionWithEditorFactory(theme);
+      const editor = extension.editorFactory(
+        stubTui,
+        stubTheme,
+        stubKeybindings,
+      );
+
+      sendKeys(editor, ["\x1b", ":", ...Array.from("averyveryverylongcommand")]);
+      const lines = editor.render(20);
+      const status = extension.modeStatusUpdates.at(-1);
+
+      assert.equal(status?.key, "pi-vim-mode");
+      assert.ok(status?.text?.includes("\x1b[36m"));
+      assert.equal(visibleWidth(status?.text ?? ""), 20);
+      assert.equal(lines.at(-1)?.includes(" EX "), false);
+      assert.equal(visibleWidth(lines.at(-1) ?? ""), 20);
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("ex mini-mode", () => {
-  it("renders the pending EX command and consumes prefixed counts", () => {
+  it("keeps the pending EX command out of the editor border", () => {
     const session = createEditorWithSpy("hello");
 
     sendKeys(session.editor, ["2", ":"]);
 
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :_ "));
+    const footer = session.editor.render(80).at(-1) ?? "";
+    assert.equal(footer.includes(" EX "), false);
+    assert.equal(visibleWidth(footer), 80);
 
     sendKeys(session.editor, ["\x1b", "x"]);
 
@@ -1179,19 +1267,20 @@ describe("ex mini-mode", () => {
     assert.equal(session.editor.getRegister(), "h");
   });
 
-  it("keeps the EX label visible on narrow renders", () => {
+  it("keeps narrow editor borders fitted without an EX label", () => {
     const session = createEditorWithSpy("hello");
 
     sendKeys(session.editor, [":", ...Array.from("averyveryverylongcommand")]);
 
     const footer = session.editor.render(20).at(-1) ?? "";
 
-    assert.ok(footer.includes(" EX "));
-    assert.ok(footer.endsWith("_ "));
+    assert.equal(footer.includes(" EX "), false);
+    assert.equal(visibleWidth(footer), 20);
   });
 
-  it("renders EX labels with the EX-specific colorizer", () => {
+  it("publishes EX labels with the EX-specific colorizer", () => {
     const calls: string[] = [];
+    const labels: Array<string | undefined> = [];
     const colorizers = {
       insert: (s: string) => {
         calls.push(`insert:${s}`);
@@ -1212,20 +1301,22 @@ describe("ex mini-mode", () => {
     };
     const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, {
       labelColorizers: colorizers,
+      onModeLabel: (label) => labels.push(label),
     });
 
     editor.handleInput("\x1b");
     sendKeys(editor, [":"]);
 
-    const footer = editor.render(80).at(-1) ?? "";
+    const lines = editor.render(80);
 
     assert.deepEqual(calls, ["ex: EX :_ "]);
-    assert.ok(footer.includes(" EX :_ "));
-    assert.ok(footer.endsWith("\x1b[36m EX :_ \x1b[39m"));
+    assert.equal(labels.at(-1), "\x1b[36m EX :_ \x1b[39m");
+    assert.equal(lines.at(-1)?.includes(" EX "), false);
   });
 
-  it("renders VISUAL and V-LINE labels with the visual colorizer", () => {
+  it("publishes VISUAL and V-LINE labels with the visual colorizer", () => {
     const calls: string[] = [];
+    const labels: Array<string | undefined> = [];
     const colorizers = {
       insert: (s: string) => `<insert>${s}</insert>`,
       normal: (s: string) => {
@@ -1240,16 +1331,19 @@ describe("ex mini-mode", () => {
     };
     const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, {
       labelColorizers: colorizers,
+      onModeLabel: (label) => labels.push(label),
     });
 
     // hi, Esc → normal, v → VISUAL, V → V-LINE.
     sendKeys(editor, ["h", "i", "\x1b", "v"]);
-    const visualFooter = editor.render(80).at(-1) ?? "";
+    const visualLines = editor.render(80);
     sendKeys(editor, ["V"]);
-    const vLineFooter = editor.render(80).at(-1) ?? "";
+    const vLineLines = editor.render(80);
 
-    assert.ok(visualFooter.endsWith("<visual> VISUAL </visual>"));
-    assert.ok(vLineFooter.endsWith("<visual> V-LINE </visual>"));
+    assert.equal(labels.at(-2), "<visual> VISUAL </visual>");
+    assert.equal(labels.at(-1), "<visual> V-LINE </visual>");
+    assert.equal(visualLines.at(-1)?.includes(" VISUAL "), false);
+    assert.equal(vLineLines.at(-1)?.includes(" V-LINE "), false);
     // Visual modes use the visual colorizer, never collapsing to normal.
     assert.deepEqual(calls, ["visual: VISUAL ", "visual: V-LINE "]);
   });
@@ -1431,7 +1525,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~tree\x1b[201~\r"]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
+    assert.equal(session.editor.render(80).at(-1)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1448,7 +1542,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~tree", "\x1b", "[201~\r"]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
+    assert.equal(session.editor.render(80).at(-1)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1470,7 +1564,7 @@ describe("ex mini-mode", () => {
     ]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
+    assert.equal(session.editor.render(80).at(-1)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1492,7 +1586,7 @@ describe("ex mini-mode", () => {
     ]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
+    assert.equal(session.editor.render(80).at(-1)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1528,7 +1622,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~q!\n\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.endsWith(" EX :q!_ "));
+    assert.equal(pendingExLabel(session)?.includes(" EX "), false);
     assert.equal(session.editor.getText(), "hello");
     assert.deepEqual(session.notifications, []);
   });
@@ -1550,7 +1644,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~q\nall!\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.endsWith(" EX :q_ "));
+    assert.equal(pendingExLabel(session)?.includes(" EX "), false);
   });
 
   it("pasted newline in a split paste waits for a typed enter", () => {
@@ -1574,7 +1668,7 @@ describe("ex mini-mode", () => {
 
       assert.equal(session.quitCalls, 0);
       assert.equal(forwardedEscapeCount, 0);
-      assert.ok(pendingExLabel(session)?.endsWith(" EX :q!_ "));
+      assert.equal(pendingExLabel(session)?.includes(" EX "), false);
 
       sendKeys(session.editor, ["\r"]);
 
@@ -1600,7 +1694,7 @@ describe("ex mini-mode", () => {
     ]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.endsWith(" EX :qa!_ "));
+    assert.equal(pendingExLabel(session)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
     assert.equal(session.quitCalls, 1);
@@ -1613,7 +1707,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~\nq!\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.endsWith(" EX :_ "));
+    assert.equal(pendingExLabel(session)?.includes(" EX "), false);
   });
 
   it("typing continues after a discarded paste tail", () => {
@@ -1637,7 +1731,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~q!\r\nrest\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.endsWith(" EX :q!_ "));
+    assert.equal(pendingExLabel(session)?.includes(" EX "), false);
   });
 
   it("each paste contributes its own first line", () => {
@@ -1649,7 +1743,7 @@ describe("ex mini-mode", () => {
       "\x1b[200~a!\nY\x1b[201~",
     ]);
 
-    assert.ok(pendingExLabel(session)?.endsWith(" EX :qa!_ "));
+    assert.equal(pendingExLabel(session)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
     assert.equal(session.quitCalls, 1);
@@ -2337,7 +2431,7 @@ describe("ex pi-command bridge", () => {
     sendKeys(session.editor, [":", "\x1b[200~!rm -rf .\nrest\x1b[201~"]);
 
     assert.deepEqual(session.dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :!rm -rf ._ "));
+    assert.equal(session.editor.render(80).at(-1)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
 
@@ -2350,7 +2444,7 @@ describe("ex pi-command bridge", () => {
     sendKeys(session.editor, [":", "\x1b[200~tree\nrest\x1b[201~"]);
 
     assert.deepEqual(session.dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
+    assert.equal(session.editor.render(80).at(-1)?.includes(" EX "), false);
 
     sendKeys(session.editor, ["\r"]);
 
@@ -3008,7 +3102,7 @@ describe("mode color settings", () => {
 
   it("labelSync thinking defers the label to the host color, reverse-video wrapped", async () => {
     const theme = createRecordingTheme();
-    const { editor, restore } = await createBorderEditor(theme, {
+    const { editor, restore, extension } = await createBorderEditor(theme, {
       modeColors: { insert: "insertToken" },
       borderSync: allSurfaces("thinking"),
       labelSync: allSurfaces("thinking"),
@@ -3019,14 +3113,16 @@ describe("mode color settings", () => {
       // in its reverse-video block.
       editor.borderColor = (text: string) => theme.fg("thinkingOff", text);
       theme.fgCalls.length = 0;
-      let footer = editor.render(80).at(-1) ?? "";
+      editor.render(80);
+      let status = extension.modeStatusUpdates.at(-1)?.text ?? "";
       assert.equal(
         theme.fgCalls.at(-1)?.token,
         "insertToken",
         "label paints its mode color at rest",
       );
-      assert.ok(
-        footer.includes(`<insertToken>${reverseInsertLabel}</insertToken>`),
+      assert.equal(
+        status,
+        `<insertToken>${reverseInsertLabel}</insertToken>`,
         "mode label keeps its reverse-video block styling at rest",
       );
 
@@ -3034,14 +3130,16 @@ describe("mode color settings", () => {
       // reverse-video wrapped so it keeps its block styling.
       editor.borderColor = (text: string) => theme.fg("thinkingHigh", text);
       theme.fgCalls.length = 0;
-      footer = editor.render(80).at(-1) ?? "";
+      editor.render(80);
+      status = extension.modeStatusUpdates.at(-1)?.text ?? "";
       assert.equal(
         theme.fgCalls.at(-1)?.token,
         "thinkingHigh",
         "label inherits the active thinking color",
       );
-      assert.ok(
-        footer.includes("\x1b[7m<thinkingHigh> INSERT </thinkingHigh>\x1b[27m"),
+      assert.equal(
+        status,
+        "\x1b[7m<thinkingHigh> INSERT </thinkingHigh>\x1b[27m",
         "deferred label wraps reverse-video around the host color",
       );
     } finally {
@@ -3111,7 +3209,7 @@ describe("mode color settings", () => {
 
   it("legacy syncBorderColorWithMode inherit maps to thinking on both surfaces", async () => {
     const theme = createRecordingTheme();
-    const { editor, restore } = await createBorderEditor(theme, {
+    const { editor, restore, extension } = await createBorderEditor(theme, {
       modeColors: { insert: "insertToken" },
       syncBorderColorWithMode: "inherit",
     });
@@ -3137,14 +3235,15 @@ describe("mode color settings", () => {
 
       // Label follows the same thinking policy.
       theme.fgCalls.length = 0;
-      const footer = editor.render(80).at(-1) ?? "";
+      editor.render(80);
       assert.equal(
         theme.fgCalls.at(-1)?.token,
         "thinkingHigh",
         "label follows the same thinking policy",
       );
-      assert.ok(
-        footer.includes("\x1b[7m<thinkingHigh> INSERT </thinkingHigh>\x1b[27m"),
+      assert.equal(
+        extension.modeStatusUpdates.at(-1)?.text,
+        "\x1b[7m<thinkingHigh> INSERT </thinkingHigh>\x1b[27m",
       );
     } finally {
       restore();
@@ -3394,7 +3493,8 @@ describe("cursor shape rendering", () => {
     const footer = lines.at(-1) ?? "";
 
     assert.deepEqual(tui.terminalWrites, [BLOCK_CURSOR_SHAPE]);
-    assert.ok(footer.includes(" EX :_ "));
+    assert.equal(footer.includes(" EX "), false);
+    assert.equal(visibleWidth(footer), 20);
     assert.equal(markerLine.includes(SOFTWARE_CURSOR_SPACE), false);
     assertNoCursorShapeSequences(lines);
   });
@@ -9671,21 +9771,40 @@ describe("visual mode — entering and leaving", () => {
   });
 });
 
-describe("visual mode — footer label", () => {
+describe("visual mode — status label", () => {
+  const createEditorWithLabels = () => {
+    const labels: Array<string | undefined> = [];
+    const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, {
+      onModeLabel: (label) => labels.push(label),
+    });
+    for (const char of "hello") editor.handleInput(char);
+    editor.handleInput("\x1b");
+    editor.handleInput("0");
+    return { editor, labels };
+  };
+
   it("shows VISUAL and V-LINE", () => {
-    const { editor } = createEditorWithSpy("hello");
+    const { editor, labels } = createEditorWithLabels();
     sendKeys(editor, ["v"]);
-    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL "));
+    const visualLines = editor.render(80);
     sendKeys(editor, ["V"]);
-    assert.ok(editor.render(80).at(-1)?.endsWith(" V-LINE "));
+    const vLineLines = editor.render(80);
+    assert.equal(labels.at(-2), " VISUAL ");
+    assert.equal(labels.at(-1), " V-LINE ");
+    assert.equal(visualLines.at(-1)?.includes(" VISUAL "), false);
+    assert.equal(vLineLines.at(-1)?.includes(" V-LINE "), false);
   });
 
   it("echoes a pending count and a pending char motion", () => {
-    const { editor } = createEditorWithSpy("hello");
+    const { editor, labels } = createEditorWithLabels();
     sendKeys(editor, ["v", "2"]);
-    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL 2_ "));
+    const countLines = editor.render(80);
     sendKeys(editor, ["l", "f"]);
-    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL f_ "));
+    const motionLines = editor.render(80);
+    assert.equal(labels.at(-2), " VISUAL 2_ ");
+    assert.equal(labels.at(-1), " VISUAL f_ ");
+    assert.equal(countLines.at(-1)?.includes(" VISUAL "), false);
+    assert.equal(motionLines.at(-1)?.includes(" VISUAL "), false);
   });
 });
 
@@ -9746,7 +9865,7 @@ describe("visual mode — inert normal-mode commands", () => {
   it(": does not open the EX mini-mode", () => {
     const editor = stays([":"]);
     assert.equal(editor.getMode(), "visual");
-    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL "));
+    assert.equal(editor.render(80).at(-1)?.includes(" VISUAL "), false);
   });
 
   it("printable keys are swallowed rather than typed into the buffer", () => {
