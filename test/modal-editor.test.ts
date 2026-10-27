@@ -1177,11 +1177,7 @@ describe("mode change extension hook", () => {
 describe("mode status extension hook", () => {
   it("publishes initial, mode, EX, and visual labels without border text", async () => {
     const extension = await installExtensionWithEditorFactory();
-    const editor = extension.editorFactory(
-      stubTui,
-      stubTheme,
-      stubKeybindings,
-    );
+    const editor = extension.editorFactory(stubTui, stubTheme, stubKeybindings);
 
     sendKeys(editor, ["\x1b"]);
     const initialLines = editor.render(80);
@@ -1221,7 +1217,7 @@ describe("mode status extension hook", () => {
       borderColor: (s: string) => s,
       fg: (_token: string, text: string) => `\x1b[36m${text}\x1b[39m`,
       bold: (s: string) => s,
-    } as Theme;
+    } as unknown as Theme;
     const restore = setPiVimSettingsReaderForTests(() => ({
       modeColors: { ex: "warning" },
     }));
@@ -1234,7 +1230,11 @@ describe("mode status extension hook", () => {
         stubKeybindings,
       );
 
-      sendKeys(editor, ["\x1b", ":", ...Array.from("averyveryverylongcommand")]);
+      sendKeys(editor, [
+        "\x1b",
+        ":",
+        ...Array.from("averyveryverylongcommand"),
+      ]);
       const lines = editor.render(20);
       const status = extension.modeStatusUpdates.at(-1);
 
