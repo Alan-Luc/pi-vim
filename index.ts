@@ -236,6 +236,14 @@ type ModalEditorInternals = {
 
 type CustomEditorConstructorArgs = ConstructorParameters<typeof CustomEditor>;
 
+function transcriptScrollLines(data: string, halfPage: number): number {
+  if (matchesKey(data, "ctrl+d")) return halfPage;
+  if (matchesKey(data, "ctrl+u")) return -halfPage;
+  if (matchesKey(data, "ctrl+e")) return 1;
+  if (matchesKey(data, "ctrl+y")) return -1;
+  return 0;
+}
+
 type ModalEditorOptions = {
   labelColorizers?: ModeColorizers | null;
   borderColorizers?: ModeColorizers | null;
@@ -2310,7 +2318,24 @@ export class ModalEditor extends CustomEditor {
     }
   }
 
+  private scrollTranscript(data: string): boolean {
+    const viewport = this.tui as { scrollBy?: (lines: number) => void };
+    // Main-screen terminals own their scrollback; the keys stay Pi's there.
+    if (typeof viewport.scrollBy !== "function") return false;
+
+    // Half a screen is half the terminal; Pi exposes no viewport height.
+    const halfPage = Math.max(1, Math.floor(this.tui.terminal.rows / 2));
+    const lines = transcriptScrollLines(data, halfPage);
+    if (lines === 0) return false;
+
+    const count = this.takeTotalCount(0);
+    viewport.scrollBy(count > 0 ? Math.sign(lines) * count : lines);
+    return true;
+  }
+
   private handleNormalMode(data: string): void {
+    if (this.mode === "normal" && this.scrollTranscript(data)) return;
+
     if (this.pendingG) {
       if (isDigit(data)) {
         this.pendingGCount += data;

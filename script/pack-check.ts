@@ -245,9 +245,14 @@ const THRESHOLDS = {
   // runtime. Measured packed 58644 B, unpacked 231210 B. Budgets bumped 58500 ->
   // 59000 and 229600 -> 231400, leaving ~356 B / ~190 B headroom. Files stay at
   // 17.
+  // Transcript scrolling: index.ts adds the normal-mode window-scroll keys
+  // (Ctrl-d/Ctrl-u half page, Ctrl-e/Ctrl-y one line) plus the README rows that
+  // document them. Measured packed 59217 B, unpacked 233174 B. Budgets bumped
+  // 59000 -> 59700 and 231400 -> 234000, leaving ~483 B / ~826 B headroom.
+  // Files stay at 17.
   maxFiles: 17,
-  maxSize: 59000,
-  maxUnpackedSize: 231400,
+  maxSize: 59700,
+  maxUnpackedSize: 234000,
 } as const;
 
 function compareStrings(a: string, b: string): number {

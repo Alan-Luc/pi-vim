@@ -155,8 +155,12 @@ Most navigation keys accept a `{count}` prefix (max: `9999`); `%` intentionally 
 | `W` / `B` / `E`; `{count}W/B/E` | whitespace-delimited `WORD` motions |
 | `{` / `}`; `{count}{` / `{count}}` | Previous/next paragraph start |
 | `%` | Jump to the matching `()`, `[]`, or `{}` partner |
+| `Ctrl+d` / `Ctrl+u` | Scroll Pi's transcript down/up half a terminal |
+| `Ctrl+e` / `Ctrl+y` | Scroll Pi's transcript down/up one line |
 
 `word` splits punctuation from keyword chars; `WORD` treats any non-whitespace run as one token (`foo-bar`, `path/to`). Paragraph starts are non-blank lines at BOF or after blank lines (`^\s*$`). `{` / `}` are navigation-only; brace operator forms (`d{`, `c}`, `y{`, …) are out of scope.
+
+The scroll keys move Pi's transcript, not the cursor, and need Pi's fullscreen TUI: in regular mode the terminal owns the scrollback, so they fall through to Pi. They accept a `{count}` (lines instead of half a terminal) and are ignored in insert and visual mode.
 
 `%` uses a delimiter under the cursor or scans forward on the current logical line. It matches `()`, `[]`, `{}` buffer-wide with lexical, nested, same-delimiter, parser-unaware matching; quotes/comments and mixed delimiters are not special. Missing/unmatched sources no-op. Counts are unsupported: `{count}%` consumes the count and no-ops; counted `d%` / `y%` / `c%` cancel without writes.
 
@@ -490,6 +494,7 @@ pi-vim does not bundle any such tool and does not care which one you use — any
 | Text objects | `iw` / `aw`, `iW` / `aW`, quote objects, and paren/bracket/brace objects; delimited counts cancel | Full text-object set |
 | `%` matching | `()`, `[]`, `{}` only; lexical same-delimiter matching with no counts, quote/angle matching, parser/matchit logic, or mixed-delimiter validation | Also supports percentage jumps and broader matching |
 | Count prefix | Operators, motions, navigation, `x`, `r`, `p`, `P`; capped at `MAX_COUNT=9999` | Full support |
+| Transcript scrolling | `Ctrl+d`/`Ctrl+u` and `Ctrl+e`/`Ctrl+y` scroll Pi's fullscreen transcript without moving the cursor; `Ctrl+j`/`Ctrl+k` are not used because `Ctrl+j` is the same byte as `Enter` without the Kitty keyboard protocol | Scrolls Vim's own window and moves the cursor |
 | Named registers / macros / search | Not implemented; the unnamed register is supported | Supported |
 | Ex commands | EX mini-mode quits (`:q`, `:qa`, `:quit`, `:qall`, `:quitall`, and their `!` forms), dispatches non-conflicting Pi slash commands (`:tree`, `:model opus`), and runs shell commands via `:!cmd`; vim ex semantics are reserved, not implemented | Full ex command-line surface |
 | Multi-line operators | `d/c/y` with `w/e/b`, `W/E/B`, `j/k`, and `G`; not the full Vim motion matrix | Rich cross-line semantics |
